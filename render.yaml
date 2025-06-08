@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: smm
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PAGE_ACCESS_TOKEN
+        value: your_facebook_page_token_here
+      - key: GEMINI_API_KEY
+        value: your_gemini_api_key_here
+      - key: VERIFY_TOKEN
+        value: oceanofyouthbot
+    autoDeploy: true
