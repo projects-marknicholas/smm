@@ -2,7 +2,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBV-D6--lLiniEfUbuNNIubGt7m8BcEF_c",
+  apiKey: "BOBO KABA",
   authDomain: "smart-medicine-monitoring.firebaseapp.com",
   projectId: "smart-medicine-monitoring",
   storageBucket: "smart-medicine-monitoring.firebasestorage.app",

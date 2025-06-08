@@ -16,7 +16,7 @@ import {
 
 export const addHistory = async (req, res) => {
   try {
-    const { medicine, scheduled_time, taken_time } = req.body;
+    const { history_title, action, medicine, scheduled_time, taken_time } = req.body;
 
     // Validate required fields
     if (!medicine || !scheduled_time) {
@@ -26,7 +26,7 @@ export const addHistory = async (req, res) => {
       });
     }
 
-    // Validate ISO date format
+    // Validate scheduled_time ISO format
     const scheduleDate = new Date(scheduled_time);
     if (isNaN(scheduleDate.getTime())) {
       return res.status(400).json({
@@ -48,29 +48,35 @@ export const addHistory = async (req, res) => {
 
       // Calculate time difference in minutes
       const diffInMs = takenDate - scheduleDate;
-      const diffInMinutes = Math.abs(diffInMs / 60000); 
+      const diffInMinutes = Math.abs(diffInMs / 60000);
 
       if (diffInMs <= 0) {
-        status = 'taken on time'; 
+        status = 'taken on time';
       } else if (diffInMinutes <= 5) {
-        status = 'taken on time'; 
+        status = 'taken on time';
       } else {
         status = 'taken late';
       }
     }
 
+    // Get current Manila time in ISO format for created_at
+    const manilaTimeStr = new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" });
+    const createdAt = new Date(manilaTimeStr).toISOString();
+
     // Insert into Firestore
     await addDoc(collection(db, 'history'), {
+      history_title: history_title || null,
+      action: action || null,
       medicine,
       scheduled_time,
       taken_time: taken_time || null,
       status,
-      created_at: new Date().toISOString()
+      created_at: createdAt
     });
 
     res.status(201).json({
       status: "success",
-      message: `History record created!`,
+      message: "History record created!"
     });
 
   } catch (error) {
@@ -78,7 +84,7 @@ export const addHistory = async (req, res) => {
     res.status(500).json({
       status: "error",
       message: "Internal server error",
-      ...(process.env.NODE_ENV === 'development' && { 
+      ...(process.env.NODE_ENV === 'development' && {
         details: error.message,
         stack: error.stack
       })
@@ -206,7 +212,7 @@ export const deviceHandler = async (req, res) => {
         triggeredAutomations.push(automation);
         
         // Update medicine count
-        const medicineField = `medicine_${automation.medicine.split(' ')[1] || '1'}`;
+        const medicineField = automation.medicine;
         const medicineRef = doc(db, 'medicines', 'novWjoQV588azhCbLsyD');
         
         promises.push(
@@ -218,6 +224,8 @@ export const deviceHandler = async (req, res) => {
         
         // Insert history record
         const historyData = {
+          history_title: automation.automation_title || null,
+          action: automation.action || null,
           medicine: automation.medicine,
           scheduled_time: automation.schedule_time,
           taken_time: "",
@@ -229,11 +237,7 @@ export const deviceHandler = async (req, res) => {
         
         // Update automation
         promises.push(
-          updateDoc(doc(db, 'automations', automation.id), {
-            status: 'off',
-            taken_time: "",
-            updated_at: currentISOTime
-          })
+          deleteDoc(doc(db, 'automations', automation.id))
         );
       }
     });
@@ -271,46 +275,20 @@ export const updateTakenStatus = async (req, res) => {
     const currentTime = new Date(manilaTime);
     const currentISOTime = currentTime.toISOString();
 
-    // 1. Find automation with status 'off' AND empty taken_time
-    const automationsQuery = query(
-      collection(db, 'automations'),
-      where('status', '==', 'off'),
-      where('taken_time', '==', ''),
-      orderBy('updated_at', 'desc'),
-      limit(1)
-    );
-    
-    const automationSnapshot = await getDocs(automationsQuery);
-    
-    if (automationSnapshot.empty) {
-      return res.status(200).json({
-        status: "success",
-        message: "No pending automations found",
-        updated: false
-      });
-    }
-
-    const automationDoc = automationSnapshot.docs[0];
-    const automation = { id: automationDoc.id, ...automationDoc.data() };
-
-    // 2. Find ANY history record with:
-    //    - Same medicine
-    //    - Empty taken_time
-    //    - Most recent first
+    // 1. Find the most recent pending history record (taken_time == "")
     const historyQuery = query(
       collection(db, 'history'),
-      where('medicine', '==', automation.medicine),
       where('taken_time', '==', ''),
       orderBy('created_at', 'desc'),
       limit(1)
     );
 
     const historySnapshot = await getDocs(historyQuery);
-    
+
     if (historySnapshot.empty) {
       return res.status(200).json({
         status: "success",
-        message: "No pending history records found for this medicine",
+        message: "No pending history records found",
         updated: false
       });
     }
@@ -319,7 +297,7 @@ export const updateTakenStatus = async (req, res) => {
     const history = historyDoc.data();
     const historyId = historyDoc.id;
 
-    // 3. Calculate status based on scheduled time (from HISTORY, not automation)
+    // 2. Calculate status based on scheduled time (from history)
     const scheduledTime = new Date(history.scheduled_time);
     const timeDiff = currentTime - scheduledTime;
     const timeDiffMinutes = timeDiff / (1000 * 60);
@@ -327,8 +305,13 @@ export const updateTakenStatus = async (req, res) => {
 
     let status;
     if (timeDiffMinutes <= 0) {
+      // Taken early or exactly on time
+      status = "on_time";
+    } else if (timeDiffMinutes <= 5) {
+      // Taken within 5 minutes after scheduled time = on time
       status = "on_time";
     } else if (timeDiffMinutes <= 10) {
+      // Taken late, but less than or equal to 10 mins late
       status = "late";
     } else if (timeDiffHours <= 24) {
       status = "missed";
@@ -336,32 +319,23 @@ export const updateTakenStatus = async (req, res) => {
       status = "expired";
     }
 
-    // 4. Prepare updates
+    // 3. Prepare updates
     const updates = {
       taken_time: currentISOTime,
       status: status,
       updated_at: currentISOTime
     };
 
-    // 5. Execute updates
-    const batch = writeBatch(db);
-    
-    // Update automation (match by ID)
-    batch.update(doc(db, 'automations', automation.id), updates);
-    
-    // Update history (match by ID)
-    batch.update(doc(db, 'history', historyId), updates);
-    
-    await batch.commit();
+    // 4. Update ONLY the history document
+    await updateDoc(doc(db, 'history', historyId), updates);
 
     return res.status(200).json({
       status: "success",
       message: "Medication intake recorded successfully",
       updated: true,
       data: {
-        automation_id: automation.id,
         history_id: historyId,
-        scheduled_time: history.scheduled_time, // From history record
+        scheduled_time: history.scheduled_time,
         taken_time: currentISOTime,
         status: status,
         time_difference_minutes: timeDiffMinutes.toFixed(2)
@@ -374,6 +348,54 @@ export const updateTakenStatus = async (req, res) => {
       status: "error",
       message: "Failed to update records",
       details: error.message
+    });
+  }
+};
+
+export const instantMedicine = async (req, res) => {
+  try {
+    const { medicine } = req.body;
+
+    // Validate medicine parameter
+    const allowedMedicines = ['medicine_1', 'medicine_2', 'medicine_3'];
+    if (!medicine || !allowedMedicines.includes(medicine.trim())) {
+      return res.status(400).json({
+        status: "error",
+        message: `Medicine must be one of: ${allowedMedicines.join(', ')}`
+      });
+    }
+
+    // Get current Manila time ISO string
+    const manilaTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Manila" });
+    const currentTime = new Date(manilaTime);
+    const currentISOTime = currentTime.toISOString();
+
+    // Prepare automation data
+    const automationData = {
+      automation_title: "Instant Medicine",
+      action: "Take medicine",   
+      medicine: medicine.trim(),
+      schedule_time: currentISOTime,
+      taken_time: "",
+      status: "on",
+      created_at: currentISOTime,
+      updated_at: currentISOTime
+    };
+
+    // Insert automation document
+    await addDoc(collection(db, 'automations'), automationData);
+
+    res.status(201).json({
+      status: "success",
+      message: "Instant medicine automation added successfully!",
+      data: automationData
+    });
+  } catch (error) {
+    console.error('Error inserting instant medicine automation:', error);
+    res.status(500).json({
+      status: "error",
+      message: "Internal server error",
+      ...(process.env.NODE_ENV === 'development' && { details: error.message })
     });
   }
 };
